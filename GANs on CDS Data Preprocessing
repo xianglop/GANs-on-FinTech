@@ -1,0 +1,110 @@
+import numpy as np
+import pandas as pd
+import os
+import glob
+
+# Download CDS data online
+
+import requests
+import datetime
+import zipfile
+import io
+
+base_url = "https://kgc0418-tdw-data-0.s3.amazonaws.com/slices/"
+## 2016_05_01 is not a zipfile
+## 2018_11_18 is not a zipfile
+start_data = "2018_11_19"
+end_data = "2018_12_31"
+start = datetime.datetime.strptime(start_data, '%Y_%m_%d')
+end = datetime.datetime.strptime(end_data, '%Y_%m_%d')
+step = datetime.timedelta(days=1)
+
+dates = []
+
+while start <= end:
+    dates.append(start.strftime('%Y_%m_%d'))
+    start += step
+
+base_title = "CUMULATIVE_CREDITS_"
+
+for date in dates:
+    url = base_url + base_title + date + ".zip"
+    file_name = "CDS_" + date + ".csv"
+    #urllib.request.urlretrieve(url, file_name)
+    r = requests.get(url, stream=True)
+    z = zipfile.ZipFile(io.BytesIO(r.content))
+    for _, f in enumerate(z.filelist):
+        f.filename = file_name
+        z.extract(f, path = "/Users/xianglongpan/Desktop/UCB/Courses/FinTech/Capstone Project/CDS/CDS_report_replicate")
+
+# Combine all csv files into one large csv file
+
+os.chdir('/Users/xianglongpan/Desktop/UCB/Courses/FinTech/Capstone Project/CDS/CDS_report_replicate')
+extension = 'csv'
+all_filenames = [i for i in glob.glob('*.{}'.format(extension))]
+
+combined_csv = pd.concat([pd.read_csv(f) for f in all_filenames])
+combined_csv.to_csv('combined_csv.csv',index=False,encoding='utf-8-sig')
+
+# Select important features
+
+df = data.loc[:,['DISSEMINATION_ID','EFFECTIVE_DATE','END_DATE','ACTION',
+                 'CLEARED','INDICATION_OF_COLLATERALIZATION',
+                'TAXONOMY','PRICE_FORMING_CONTINUATION_DATA','PRICE_NOTATION_TYPE',
+                'PRICE_NOTATION','NOTIONAL_CURRENCY_1']]
+                
+# 1. Select only orders whose notional_currency is in U.S. dollars
+
+df = df[df['NOTIONAL_CURRENCY_1']=='USD']
+df
+
+# 2. Select only orders whose taxonomy is a high-yield (HY) or investment-grade (IG) credit default swap index 
+df = df[df['TAXONOMY'].isin(['Credit:Index:CDX:CDXIG','Credit:Index:CDX:CDXHY'])]
+df
+
+# 3. Select only orders that has a duration of around 5 years (4.5 to 5.5 years).
+df['END_DATE'] = pd.to_datetime(df['END_DATE'],format='%Y-%m-%d',errors='coerce')
+df['EFFECTIVE_DATE'] = pd.to_datetime(df['EFFECTIVE_DATE'],format='%Y-%m-%d',errors='coerce')
+df['Duration_years']=df['END_DATE']-df['EFFECTIVE_DATE']
+df['Duration_years']=df['Duration_years']/np.timedelta64(1,'Y')
+df = df[(df['Duration_years'] > 4.5)&(df['Duration_years'] < 5.5)]
+df
+
+# 4. Find duplicated DISSEMINATION_ID
+df_duplicate = df[df.duplicated(['DISSEMINATION_ID'])]
+print(df_duplicate)
+
+# 5. Only keep orders whose price_notation_type is in basis points or in percentage
+df = df[df['PRICE_NOTATION_TYPE'].isin(['BasisPoints','Basis points','Percentage'])]
+df
+
+# 6. Keep orders whose price_notation is not 0
+df = df[df['PRICE_NOTATION'] != 0]
+df
+
+# 7. Normalize the price notations
+def f(row):
+    #print(row)
+    if row['PRICE_NOTATION_TYPE']=='Percentage' and 1000 <= row['PRICE_NOTATION'] <= 100000:
+        res = row['PRICE_NOTATION'] / 10000
+    elif row['PRICE_NOTATION_TYPE']=='Basis points':
+        res = row['PRICE_NOTATION'] / 100
+    elif row['PRICE_NOTATION_TYPE']=='BasisPoints':
+        res = row['PRICE_NOTATION'] / 100
+    else:
+        res = row['PRICE_NOTATION']
+    return res
+
+df['PRICE'] = df.apply(f,axis=1)
+df
+
+# 8. Drop all rows that has an NaN in them
+df = df.dropna()
+df
+
+# 9. transform the continuous features to discrete ones, we construct bins for the prices and the notional_amounts.
+bins = [0,50,100,150,200,250,300]
+df['binned'] = pd.cut(df['PRICE'].astype(float), bins)
+print (df)
+
+# 10. Combine each 30 contiguous records into a sequence.Then add a token <GO> to the head of each sequence and append a token <END> to the end of each sequence. 
